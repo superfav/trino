@@ -35,11 +35,12 @@ public class GlueClientProvider
     public GlueClientProvider(
             GlueMetastoreStats stats,
             AWSCredentialsProvider credentialsProvider,
-            GlueHiveMetastoreConfig glueConfig)
+            GlueHiveMetastoreConfig glueConfig,
+            IcebergGlueCatalogConfig icebergGlueConfig)
     {
         requireNonNull(stats, "stats is null");
         requireNonNull(credentialsProvider, "credentialsProvider is null");
-        glueClient = createAsyncGlueClient(glueConfig, credentialsProvider, Optional.empty(), stats.newRequestMetricsCollector());
+        glueClient = createAsyncGlueClient(glueConfig, credentialsProvider, Optional.of(new SkipArchiveRequestHandler(icebergGlueConfig.isSkipArchive())), stats.newRequestMetricsCollector());
     }
 
     @Override
