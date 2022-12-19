@@ -31,6 +31,7 @@ import io.airlift.log.Logger;
 import io.airlift.units.DataSize;
 import io.trino.Session;
 import io.trino.SystemSessionProperties;
+import io.trino.client.NodeVersion;
 import io.trino.collect.cache.NonEvictableCache;
 import io.trino.exchange.ExchangeManagerRegistry;
 import io.trino.execution.DynamicFilterConfig;
@@ -342,7 +343,7 @@ import static io.trino.sql.planner.SortExpressionExtractor.extractSortExpression
 import static io.trino.sql.planner.SystemPartitioningHandle.COORDINATOR_DISTRIBUTION;
 import static io.trino.sql.planner.SystemPartitioningHandle.FIXED_ARBITRARY_DISTRIBUTION;
 import static io.trino.sql.planner.SystemPartitioningHandle.FIXED_BROADCAST_DISTRIBUTION;
-import static io.trino.sql.planner.SystemPartitioningHandle.SCALED_WRITER_DISTRIBUTION;
+import static io.trino.sql.planner.SystemPartitioningHandle.SCALED_WRITER_ROUND_ROBIN_DISTRIBUTION;
 import static io.trino.sql.planner.SystemPartitioningHandle.SINGLE_DISTRIBUTION;
 import static io.trino.sql.planner.optimizations.PlanNodeSearcher.searchFrom;
 import static io.trino.sql.planner.plan.AggregationNode.Step.FINAL;
@@ -423,6 +424,7 @@ public class LocalExecutionPlanner
     private final TableExecuteContextManager tableExecuteContextManager;
     private final ExchangeManagerRegistry exchangeManagerRegistry;
     private final PositionsAppenderFactory positionsAppenderFactory;
+    private final NodeVersion version;
 
     private final NonEvictableCache<FunctionKey, AccumulatorFactory> accumulatorFactoryCache = buildNonEvictableCache(CacheBuilder.newBuilder()
             .maximumSize(1000)
@@ -456,7 +458,8 @@ public class LocalExecutionPlanner
             DynamicFilterConfig dynamicFilterConfig,
             BlockTypeOperators blockTypeOperators,
             TableExecuteContextManager tableExecuteContextManager,
-            ExchangeManagerRegistry exchangeManagerRegistry)
+            ExchangeManagerRegistry exchangeManagerRegistry,
+            NodeVersion version)
     {
         this.plannerContext = requireNonNull(plannerContext, "plannerContext is null");
         this.metadata = plannerContext.getMetadata();
@@ -502,6 +505,7 @@ public class LocalExecutionPlanner
         this.tableExecuteContextManager = requireNonNull(tableExecuteContextManager, "tableExecuteContextManager is null");
         this.exchangeManagerRegistry = requireNonNull(exchangeManagerRegistry, "exchangeManagerRegistry is null");
         this.positionsAppenderFactory = new PositionsAppenderFactory(blockTypeOperators);
+        this.version = requireNonNull(version, "version is null");
     }
 
     public LocalExecutionPlan plan(
@@ -516,7 +520,7 @@ public class LocalExecutionPlanner
 
         if (partitioningScheme.getPartitioning().getHandle().equals(FIXED_BROADCAST_DISTRIBUTION) ||
                 partitioningScheme.getPartitioning().getHandle().equals(FIXED_ARBITRARY_DISTRIBUTION) ||
-                partitioningScheme.getPartitioning().getHandle().equals(SCALED_WRITER_DISTRIBUTION) ||
+                partitioningScheme.getPartitioning().getHandle().equals(SCALED_WRITER_ROUND_ROBIN_DISTRIBUTION) ||
                 partitioningScheme.getPartitioning().getHandle().equals(SINGLE_DISTRIBUTION) ||
                 partitioningScheme.getPartitioning().getHandle().equals(COORDINATOR_DISTRIBUTION)) {
             return plan(taskContext, plan, outputLayout, types, partitionedSourceOrder, new TaskOutputFactory(outputBuffer));
@@ -955,7 +959,8 @@ public class LocalExecutionPlanner
                     analyzeContext.getQueryPerformanceFetcher(),
                     metadata,
                     plannerContext.getFunctionManager(),
-                    node.isVerbose());
+                    node.isVerbose(),
+                    version);
             return new PhysicalOperation(operatorFactory, makeLayout(node), context, source);
         }
 
@@ -2180,7 +2185,7 @@ public class LocalExecutionPlanner
                 Set<Integer> potentialProbeInputs = indexLookupToProbeInput.get(lookupSymbol);
                 checkState(!potentialProbeInputs.isEmpty(), "Must have at least one source from the probe input");
                 if (potentialProbeInputs.size() > 1) {
-                    overlappingFieldSetsBuilder.add(potentialProbeInputs.stream().collect(toImmutableSet()));
+                    overlappingFieldSetsBuilder.add(ImmutableSet.copyOf(potentialProbeInputs));
                 }
                 remappedProbeKeyChannelsBuilder.add(Iterables.getFirst(potentialProbeInputs, null));
             }
@@ -3215,7 +3220,7 @@ public class LocalExecutionPlanner
                         // Disabling partial pre-aggregation memory limit effectively
                         // turns PARTIAL aggregation into INTERMEDIATE.
                         Optional.empty());
-            }).orElse(new DevNullOperatorFactory(context.getNextOperatorId(), node.getId()));
+            }).orElseGet(() -> new DevNullOperatorFactory(context.getNextOperatorId(), node.getId()));
 
             List<Integer> inputChannels = node.getColumns().stream()
                     .map(source::symbolToChannel)
@@ -3288,12 +3293,12 @@ public class LocalExecutionPlanner
                         200,
                         // final aggregation ignores partial pre-aggregation memory limit
                         Optional.empty());
-            }).orElse(new DevNullOperatorFactory(context.getNextOperatorId(), node.getId()));
+            }).orElseGet(() -> new DevNullOperatorFactory(context.getNextOperatorId(), node.getId()));
 
             Map<Symbol, Integer> aggregationOutput = outputMapping.buildOrThrow();
             StatisticAggregationsDescriptor<Integer> descriptor = node.getStatisticsAggregationDescriptor()
                     .map(desc -> desc.map(aggregationOutput::get))
-                    .orElse(StatisticAggregationsDescriptor.empty());
+                    .orElseGet(StatisticAggregationsDescriptor::empty);
 
             OperatorFactory operatorFactory = new TableFinishOperatorFactory(
                     context.getNextOperatorId(),
@@ -3506,7 +3511,7 @@ public class LocalExecutionPlanner
 
             return result.isPresent()
                     && result.get() instanceof ExchangeNode
-                    && ((ExchangeNode) result.get()).getPartitioningScheme().getPartitioning().getHandle().equals(SCALED_WRITER_DISTRIBUTION);
+                    && ((ExchangeNode) result.get()).getPartitioningScheme().getPartitioning().getHandle().isScaleWriters();
         }
 
         private PhysicalOperation createLocalMerge(ExchangeNode node, LocalExecutionPlanContext context)
@@ -3533,7 +3538,6 @@ public class LocalExecutionPlanner
                     Optional.empty(),
                     maxLocalExchangeBufferSize,
                     blockTypeOperators,
-                    context.getTaskContext()::getPhysicalWrittenDataSize,
                     getWriterMinSize(session));
 
             List<Symbol> expectedLayout = node.getInputs().get(0);
@@ -3611,7 +3615,6 @@ public class LocalExecutionPlanner
                     hashChannel,
                     maxLocalExchangeBufferSize,
                     blockTypeOperators,
-                    context.getTaskContext()::getPhysicalWrittenDataSize,
                     getWriterMinSize(session));
             for (int i = 0; i < node.getSources().size(); i++) {
                 DriverFactoryParameters driverFactoryParameters = driverFactoryParametersList.get(i);

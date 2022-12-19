@@ -43,7 +43,6 @@ import io.trino.sql.planner.plan.PlanFragmentId;
 import io.trino.sql.planner.plan.PlanNodeId;
 import io.trino.sql.planner.plan.RemoteSourceNode;
 import io.trino.util.Failures;
-import org.joda.time.DateTime;
 
 import javax.annotation.concurrent.GuardedBy;
 
@@ -59,6 +58,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.stream.Stream;
 
+import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableList.toImmutableList;
@@ -346,7 +346,7 @@ public class PipelinedStageExecution
                         .findFirst()
                         .map(this::rewriteTransportFailure)
                         .map(ExecutionFailureInfo::toException)
-                        .orElse(new TrinoException(GENERIC_INTERNAL_ERROR, "A task failed for an unknown reason"));
+                        .orElseGet(() -> new TrinoException(GENERIC_INTERNAL_ERROR, "A task failed for an unknown reason"));
                 fail(failure);
                 break;
             case CANCELED:
@@ -560,6 +560,12 @@ public class PipelinedStageExecution
         return stateMachine.getFailureCause();
     }
 
+    @Override
+    public String toString()
+    {
+        return stateMachine.toString();
+    }
+
     private static Split createExchangeSplit(RemoteTask sourceTask, RemoteTask destinationTask)
     {
         // Fetch the results from the buffer assigned to the task based on id
@@ -574,7 +580,6 @@ public class PipelinedStageExecution
 
         private final StageId stageId;
         private final StateMachine<State> state;
-        private final AtomicReference<DateTime> schedulingComplete = new AtomicReference<>();
         private final AtomicReference<ExecutionFailureInfo> failureCause = new AtomicReference<>();
 
         private PipelinedStageStateMachine(StageId stageId, Executor executor)
@@ -602,7 +607,6 @@ public class PipelinedStageExecution
 
         public boolean transitionToScheduled()
         {
-            schedulingComplete.compareAndSet(null, DateTime.now());
             return state.setIf(SCHEDULED, currentState -> currentState == PLANNED || currentState == SCHEDULING || currentState == SCHEDULING_SPLITS);
         }
 
@@ -659,6 +663,15 @@ public class PipelinedStageExecution
         public void addStateChangeListener(StateChangeListener<State> stateChangeListener)
         {
             state.addStateChangeListener(stateChangeListener);
+        }
+
+        @Override
+        public String toString()
+        {
+            return toStringHelper(this)
+                    .add("stageId", stageId)
+                    .add("state", state)
+                    .toString();
         }
     }
 }

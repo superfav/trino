@@ -144,6 +144,7 @@ import static io.trino.spi.ErrorType.USER_ERROR;
 import static io.trino.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static io.trino.spi.StandardErrorCode.REMOTE_HOST_GONE;
 import static io.trino.sql.planner.SystemPartitioningHandle.COORDINATOR_DISTRIBUTION;
+import static io.trino.sql.planner.SystemPartitioningHandle.SINGLE_DISTRIBUTION;
 import static io.trino.util.Failures.toFailure;
 import static java.lang.Math.max;
 import static java.lang.Math.min;
@@ -798,10 +799,12 @@ public class EventDrivenFaultTolerantQueryScheduler
 
                 FaultTolerantPartitioningScheme sinkPartitioningScheme = partitioningSchemeFactory.get(fragment.getPartitioningScheme().getPartitioning().getHandle());
                 ExchangeContext exchangeContext = new ExchangeContext(queryStateMachine.getQueryId(), new ExchangeId("external-exchange-" + stage.getStageId().getId()));
+
+                boolean preserveOrderWithinPartition = rootFragment && stage.getFragment().getPartitioning().equals(SINGLE_DISTRIBUTION);
                 Exchange exchange = closer.register(exchangeManager.createExchange(
                         exchangeContext,
                         sinkPartitioningScheme.getPartitionCount(),
-                        rootFragment));
+                        preserveOrderWithinPartition));
 
                 boolean coordinatorStage = stage.getFragment().getPartitioning().equals(COORDINATOR_DISTRIBUTION);
 
@@ -991,7 +994,7 @@ public class EventDrivenFaultTolerantQueryScheduler
                 ExecutionFailureInfo failureInfo = taskStatus.getFailures().stream()
                         .findFirst()
                         .map(this::rewriteTransportFailure)
-                        .orElse(toFailure(new TrinoException(GENERIC_INTERNAL_ERROR, "A task failed for an unknown reason")));
+                        .orElseGet(() -> toFailure(new TrinoException(GENERIC_INTERNAL_ERROR, "A task failed for an unknown reason")));
 
                 List<ScheduledTask> replacementTasks = stageExecution.taskFailed(taskId, failureInfo, taskStatus);
                 replacementTasks.forEach(task -> schedulingQueue.addOrUpdate(task, task.priority()));

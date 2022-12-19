@@ -27,7 +27,7 @@ import java.util.List;
 import java.util.Map;
 
 import static io.trino.plugin.exchange.filesystem.containers.MinioStorage.getExchangeManagerProperties;
-import static io.trino.testing.sql.TestTable.randomTableSuffix;
+import static io.trino.testing.TestingNames.randomNameSuffix;
 
 public class TestHiveTaskFailureRecoveryTest
         extends BaseHiveFailureRecoveryTest
@@ -47,11 +47,11 @@ public class TestHiveTaskFailureRecoveryTest
             Map<String, String> coordinatorProperties)
             throws Exception
     {
-        String bucketName = "test-hive-insert-overwrite-" + randomTableSuffix(); // randomizing bucket name to ensure cached TrinoS3FileSystem objects are not reused
+        String bucketName = "test-hive-insert-overwrite-" + randomNameSuffix(); // randomizing bucket name to ensure cached TrinoS3FileSystem objects are not reused
         this.hiveMinioDataLake = new HiveMinioDataLake(bucketName);
         hiveMinioDataLake.start();
 
-        this.minioStorage = new MinioStorage("test-exchange-spooling-" + randomTableSuffix());
+        this.minioStorage = new MinioStorage("test-exchange-spooling-" + randomNameSuffix());
         minioStorage.start();
 
         return S3HiveQueryRunner.builder(hiveMinioDataLake)
@@ -62,12 +62,11 @@ public class TestHiveTaskFailureRecoveryTest
                     runner.installPlugin(new FileSystemExchangePlugin());
                     runner.loadExchangeManager("filesystem", getExchangeManagerProperties(minioStorage));
                 })
-                .setHiveProperties(ImmutableMap.<String, String>builder()
+                .setHiveProperties(ImmutableMap.of(
                         // Streaming upload allocates non trivial amount of memory for buffering (16MB per output file by default).
                         // When streaming upload is enabled insert into a table with high number of buckets / partitions may cause
                         // the tests to run out of memory as the buffer space is eagerly allocated for each output file.
-                        .put("hive.s3.streaming.enabled", "false")
-                        .buildOrThrow())
+                        "hive.s3.streaming.enabled", "false"))
                 .build();
     }
 

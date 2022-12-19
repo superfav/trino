@@ -20,6 +20,7 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.ImmutableSortedSet;
 import com.google.common.io.Closer;
 import io.airlift.log.Logger;
+import io.trino.plugin.jdbc.logging.RemoteQueryModifier;
 import io.trino.plugin.jdbc.mapping.IdentifierMapping;
 import io.trino.spi.TrinoException;
 import io.trino.spi.connector.ColumnHandle;
@@ -104,6 +105,7 @@ public abstract class BaseJdbcClient
     protected final String identifierQuote;
     protected final Set<String> jdbcTypesMappedToVarchar;
     private final IdentifierMapping identifierMapping;
+    private final RemoteQueryModifier queryModifier;
 
     private final boolean supportsRetries;
 
@@ -112,24 +114,8 @@ public abstract class BaseJdbcClient
             String identifierQuote,
             ConnectionFactory connectionFactory,
             QueryBuilder queryBuilder,
-            IdentifierMapping identifierMapping)
-    {
-        this(
-                config,
-                identifierQuote,
-                connectionFactory,
-                queryBuilder,
-                identifierMapping,
-                false);
-    }
-
-    public BaseJdbcClient(
-            BaseJdbcConfig config,
-            String identifierQuote,
-            ConnectionFactory connectionFactory,
-            QueryBuilder queryBuilder,
             IdentifierMapping identifierMapping,
-            boolean supportsRetries)
+            RemoteQueryModifier remoteQueryModifier)
     {
         this(
                 identifierQuote,
@@ -137,22 +123,7 @@ public abstract class BaseJdbcClient
                 queryBuilder,
                 config.getJdbcTypesMappedToVarchar(),
                 identifierMapping,
-                supportsRetries);
-    }
-
-    public BaseJdbcClient(
-            String identifierQuote,
-            ConnectionFactory connectionFactory,
-            QueryBuilder queryBuilder,
-            Set<String> jdbcTypesMappedToVarchar,
-            IdentifierMapping identifierMapping)
-    {
-        this(
-                identifierQuote,
-                connectionFactory,
-                queryBuilder,
-                jdbcTypesMappedToVarchar,
-                identifierMapping,
+                remoteQueryModifier,
                 false);
     }
 
@@ -162,6 +133,7 @@ public abstract class BaseJdbcClient
             QueryBuilder queryBuilder,
             Set<String> jdbcTypesMappedToVarchar,
             IdentifierMapping identifierMapping,
+            RemoteQueryModifier remoteQueryModifier,
             boolean supportsRetries)
     {
         this.identifierQuote = requireNonNull(identifierQuote, "identifierQuote is null");
@@ -171,6 +143,7 @@ public abstract class BaseJdbcClient
                 .addAll(requireNonNull(jdbcTypesMappedToVarchar, "jdbcTypesMappedToVarchar is null"))
                 .build();
         this.identifierMapping = requireNonNull(identifierMapping, "identifierMapping is null");
+        this.queryModifier = requireNonNull(remoteQueryModifier, "remoteQueryModifier is null");
         this.supportsRetries = supportsRetries;
     }
 
@@ -307,7 +280,8 @@ public abstract class BaseJdbcClient
                 Optional.of(columns.build()),
                 // The query is opaque, so we don't know referenced tables
                 Optional.empty(),
-                0);
+                0,
+                Optional.empty());
     }
 
     @Override
@@ -437,7 +411,7 @@ public abstract class BaseJdbcClient
     }
 
     @Override
-    public Connection getConnection(ConnectorSession session, JdbcSplit split)
+    public Connection getConnection(ConnectorSession session, JdbcSplit split, JdbcTableHandle tableHandle)
             throws SQLException
     {
         Connection connection = connectionFactory.openConnection(session);
@@ -611,6 +585,7 @@ public abstract class BaseJdbcClient
         }
 
         try (Connection connection = connectionFactory.openConnection(session)) {
+            verify(connection.getAutoCommit());
             String remoteSchema = identifierMapping.toRemoteSchemaName(identity, connection, schemaTableName.getSchemaName());
             String remoteTable = identifierMapping.toRemoteTableName(identity, connection, remoteSchema, schemaTableName.getTableName());
             String remoteTargetTableName = identifierMapping.toRemoteTableName(identity, connection, remoteSchema, targetTableName);
@@ -624,14 +599,6 @@ public abstract class BaseJdbcClient
             // columnList is only used for createTableSql - the extraColumns are not included on the JdbcOutputTableHandle
             ImmutableList.Builder<String> columnList = ImmutableList.builderWithExpectedSize(columns.size() + (pageSinkIdColumn.isPresent() ? 1 : 0));
 
-            Optional<String> pageSinkIdColumnName = Optional.empty();
-            if (pageSinkIdColumn.isPresent()) {
-                String columnName = identifierMapping.toRemoteColumnName(connection, pageSinkIdColumn.get().getName());
-                pageSinkIdColumnName = Optional.of(columnName);
-                verifyColumnName(connection.getMetaData(), columnName);
-                columnList.add(getColumnDefinitionSql(session, pageSinkIdColumn.get(), columnName));
-            }
-
             for (ColumnMetadata column : columns) {
                 String columnName = identifierMapping.toRemoteColumnName(connection, column.getName());
                 verifyColumnName(connection.getMetaData(), columnName);
@@ -640,9 +607,17 @@ public abstract class BaseJdbcClient
                 columnList.add(getColumnDefinitionSql(session, column, columnName));
             }
 
+            Optional<String> pageSinkIdColumnName = Optional.empty();
+            if (pageSinkIdColumn.isPresent()) {
+                String columnName = identifierMapping.toRemoteColumnName(connection, pageSinkIdColumn.get().getName());
+                pageSinkIdColumnName = Optional.of(columnName);
+                verifyColumnName(connection.getMetaData(), columnName);
+                columnList.add(getColumnDefinitionSql(session, pageSinkIdColumn.get(), columnName));
+            }
+
             RemoteTableName remoteTableName = new RemoteTableName(Optional.ofNullable(catalog), Optional.ofNullable(remoteSchema), remoteTargetTableName);
             String sql = createTableSql(remoteTableName, columnList.build(), tableMetadata);
-            execute(connection, sql);
+            execute(session, connection, sql);
 
             return new JdbcOutputTableHandle(
                     catalog,
@@ -687,6 +662,7 @@ public abstract class BaseJdbcClient
         ConnectorIdentity identity = session.getIdentity();
 
         try (Connection connection = connectionFactory.openConnection(session)) {
+            verify(connection.getAutoCommit());
             String remoteSchema = identifierMapping.toRemoteSchemaName(identity, connection, schemaTableName.getSchemaName());
             String remoteTable = identifierMapping.toRemoteTableName(identity, connection, remoteSchema, schemaTableName.getTableName());
             String catalog = connection.getCatalog();
@@ -713,7 +689,7 @@ public abstract class BaseJdbcClient
             }
 
             String remoteTemporaryTableName = identifierMapping.toRemoteTableName(identity, connection, remoteSchema, generateTemporaryTableName());
-            copyTableSchema(connection, catalog, remoteSchema, remoteTable, remoteTemporaryTableName, columnNames.build());
+            copyTableSchema(session, connection, catalog, remoteSchema, remoteTable, remoteTemporaryTableName, columnNames.build());
 
             Optional<ColumnMetadata> pageSinkIdColumn = Optional.empty();
             if (shouldUseFaultTolerantExecution(session)) {
@@ -740,7 +716,7 @@ public abstract class BaseJdbcClient
         }
     }
 
-    protected void copyTableSchema(Connection connection, String catalogName, String schemaName, String tableName, String newTableName, List<String> columnNames)
+    protected void copyTableSchema(ConnectorSession session, Connection connection, String catalogName, String schemaName, String tableName, String newTableName, List<String> columnNames)
     {
         String sql = format(
                 "CREATE TABLE %s AS SELECT %s FROM %s WHERE 0 = 1",
@@ -750,7 +726,7 @@ public abstract class BaseJdbcClient
                         .collect(joining(", ")),
                 quoted(catalogName, schemaName, tableName));
         try {
-            execute(connection, sql);
+            execute(session, connection, sql);
         }
         catch (SQLException e) {
             throw new TrinoException(JDBC_ERROR, e);
@@ -788,6 +764,7 @@ public abstract class BaseJdbcClient
     protected void renameTable(ConnectorSession session, String catalogName, String remoteSchemaName, String remoteTableName, SchemaTableName newTable)
     {
         try (Connection connection = connectionFactory.openConnection(session)) {
+            verify(connection.getAutoCommit());
             String newSchemaName = newTable.getSchemaName();
             String newTableName = newTable.getTableName();
             verifyTableName(connection.getMetaData(), newTableName);
@@ -804,7 +781,7 @@ public abstract class BaseJdbcClient
     protected void renameTable(ConnectorSession session, Connection connection, String catalogName, String remoteSchemaName, String remoteTableName, String newRemoteSchemaName, String newRemoteTableName)
             throws SQLException
     {
-        execute(connection, format(
+        execute(session, connection, format(
                 "ALTER TABLE %s RENAME TO %s",
                 quoted(catalogName, remoteSchemaName, remoteTableName),
                 quoted(catalogName, newRemoteSchemaName, newRemoteTableName)));
@@ -830,9 +807,10 @@ public abstract class BaseJdbcClient
         String pageSinkInsertSql = format("INSERT INTO %s (%s) VALUES (?)",
                 quoted(pageSinkTable),
                 pageSinkIdColumnName);
+        pageSinkInsertSql = queryModifier.apply(session, pageSinkInsertSql);
         LongWriteFunction pageSinkIdWriter = (LongWriteFunction) toWriteMapping(session, TRINO_PAGE_SINK_ID_COLUMN_TYPE).getWriteFunction();
 
-        execute(connection, pageSinkTableSql);
+        execute(session, connection, pageSinkTableSql);
 
         try (PreparedStatement statement = connection.prepareStatement(pageSinkInsertSql)) {
             int batchSize = 0;
@@ -877,6 +855,7 @@ public abstract class BaseJdbcClient
         closer.register(() -> dropTable(session, temporaryTable));
 
         try (Connection connection = getConnection(session, handle)) {
+            verify(connection.getAutoCommit());
             String columns = handle.getColumnNames().stream()
                     .map(this::quoted)
                     .collect(joining(", "));
@@ -897,7 +876,7 @@ public abstract class BaseJdbcClient
                         handle.getPageSinkIdColumnName().get());
             }
 
-            execute(connection, insertSql);
+            execute(session, connection, insertSql);
         }
         catch (SQLException e) {
             throw new TrinoException(JDBC_ERROR, e);
@@ -930,6 +909,7 @@ public abstract class BaseJdbcClient
         }
 
         try (Connection connection = connectionFactory.openConnection(session)) {
+            verify(connection.getAutoCommit());
             addColumn(session, connection, table, column);
         }
         catch (SQLException e) {
@@ -947,13 +927,14 @@ public abstract class BaseJdbcClient
                 "ALTER TABLE %s ADD %s",
                 quoted(table),
                 getColumnDefinitionSql(session, column, remoteColumnName));
-        execute(connection, sql);
+        execute(session, connection, sql);
     }
 
     @Override
     public void renameColumn(ConnectorSession session, JdbcTableHandle handle, JdbcColumnHandle jdbcColumn, String newColumnName)
     {
         try (Connection connection = connectionFactory.openConnection(session)) {
+            verify(connection.getAutoCommit());
             String newRemoteColumnName = identifierMapping.toRemoteColumnName(connection, newColumnName);
             verifyColumnName(connection.getMetaData(), newRemoteColumnName);
             renameColumn(session, connection, handle.asPlainTable().getRemoteTableName(), jdbcColumn.getColumnName(), newRemoteColumnName);
@@ -966,7 +947,7 @@ public abstract class BaseJdbcClient
     protected void renameColumn(ConnectorSession session, Connection connection, RemoteTableName remoteTableName, String remoteColumnName, String newRemoteColumnName)
             throws SQLException
     {
-        execute(connection, format(
+        execute(session, connection, format(
                 "ALTER TABLE %s RENAME COLUMN %s TO %s",
                 quoted(remoteTableName),
                 quoted(remoteColumnName),
@@ -977,12 +958,13 @@ public abstract class BaseJdbcClient
     public void dropColumn(ConnectorSession session, JdbcTableHandle handle, JdbcColumnHandle column)
     {
         try (Connection connection = connectionFactory.openConnection(session)) {
+            verify(connection.getAutoCommit());
             String remoteColumnName = identifierMapping.toRemoteColumnName(connection, column.getColumnName());
             String sql = format(
                     "ALTER TABLE %s DROP COLUMN %s",
                     quoted(handle.asPlainTable().getRemoteTableName()),
                     quoted(remoteColumnName));
-            execute(connection, sql);
+            execute(session, connection, sql);
         }
         catch (SQLException e) {
             throw new TrinoException(JDBC_ERROR, e);
@@ -1031,14 +1013,14 @@ public abstract class BaseJdbcClient
         return format(
                 "INSERT INTO %s (%s%s) VALUES (%s%s)",
                 quoted(handle.getCatalogName(), handle.getSchemaName(), handle.getTemporaryTableName().orElseGet(handle::getTableName)),
-                hasPageSinkIdColumn ? quoted(handle.getPageSinkIdColumnName().get()) + ", " : "",
                 handle.getColumnNames().stream()
                         .map(this::quoted)
                         .collect(joining(", ")),
-                hasPageSinkIdColumn ? "?, " : "",
+                hasPageSinkIdColumn ? ", " + quoted(handle.getPageSinkIdColumnName().get()) : "",
                 columnWriters.stream()
                         .map(WriteFunction::getBindExpression)
-                        .collect(joining(",")));
+                        .collect(joining(",")),
+                hasPageSinkIdColumn ? ", ?" : "");
     }
 
     @Override
@@ -1089,6 +1071,7 @@ public abstract class BaseJdbcClient
     {
         ConnectorIdentity identity = session.getIdentity();
         try (Connection connection = connectionFactory.openConnection(session)) {
+            verify(connection.getAutoCommit());
             schemaName = identifierMapping.toRemoteSchemaName(identity, connection, schemaName);
             verifySchemaName(connection.getMetaData(), schemaName);
             createSchema(session, connection, schemaName);
@@ -1101,7 +1084,7 @@ public abstract class BaseJdbcClient
     protected void createSchema(ConnectorSession session, Connection connection, String remoteSchemaName)
             throws SQLException
     {
-        execute(connection, "CREATE SCHEMA " + quoted(remoteSchemaName));
+        execute(session, connection, "CREATE SCHEMA " + quoted(remoteSchemaName));
     }
 
     @Override
@@ -1109,6 +1092,7 @@ public abstract class BaseJdbcClient
     {
         ConnectorIdentity identity = session.getIdentity();
         try (Connection connection = connectionFactory.openConnection(session)) {
+            verify(connection.getAutoCommit());
             schemaName = identifierMapping.toRemoteSchemaName(identity, connection, schemaName);
             dropSchema(session, connection, schemaName);
         }
@@ -1120,7 +1104,7 @@ public abstract class BaseJdbcClient
     protected void dropSchema(ConnectorSession session, Connection connection, String remoteSchemaName)
             throws SQLException
     {
-        execute(connection, "DROP SCHEMA " + quoted(remoteSchemaName));
+        execute(session, connection, "DROP SCHEMA " + quoted(remoteSchemaName));
     }
 
     @Override
@@ -1128,6 +1112,7 @@ public abstract class BaseJdbcClient
     {
         ConnectorIdentity identity = session.getIdentity();
         try (Connection connection = connectionFactory.openConnection(session)) {
+            verify(connection.getAutoCommit());
             String remoteSchemaName = identifierMapping.toRemoteSchemaName(identity, connection, schemaName);
             String newRemoteSchemaName = identifierMapping.toRemoteSchemaName(identity, connection, newSchemaName);
             verifySchemaName(connection.getMetaData(), newRemoteSchemaName);
@@ -1141,25 +1126,26 @@ public abstract class BaseJdbcClient
     protected void renameSchema(ConnectorSession session, Connection connection, String remoteSchemaName, String newRemoteSchemaName)
             throws SQLException
     {
-        execute(connection, "ALTER SCHEMA " + quoted(remoteSchemaName) + " RENAME TO " + quoted(newRemoteSchemaName));
+        execute(session, connection, "ALTER SCHEMA " + quoted(remoteSchemaName) + " RENAME TO " + quoted(newRemoteSchemaName));
     }
 
     protected void execute(ConnectorSession session, String query)
     {
         try (Connection connection = connectionFactory.openConnection(session)) {
-            execute(connection, query);
+            execute(session, connection, query);
         }
         catch (SQLException e) {
             throw new TrinoException(JDBC_ERROR, e);
         }
     }
 
-    protected void execute(Connection connection, String query)
+    protected void execute(ConnectorSession session, Connection connection, String query)
             throws SQLException
     {
         try (Statement statement = connection.createStatement()) {
-            log.debug("Execute: %s", query);
-            statement.execute(query);
+            String modifiedQuery = queryModifier.apply(session, query);
+            log.debug("Execute: %s", modifiedQuery);
+            statement.execute(modifiedQuery);
         }
         catch (SQLException e) {
             e.addSuppressed(new RuntimeException("Query: " + query));

@@ -92,11 +92,11 @@ import static io.trino.SystemSessionProperties.getTaskRetryAttemptsOverall;
 import static io.trino.SystemSessionProperties.getTaskRetryAttemptsPerTask;
 import static io.trino.SystemSessionProperties.isEnableDynamicFiltering;
 import static io.trino.SystemSessionProperties.isFaultTolerantExecutionEventDriverSchedulerEnabled;
+import static io.trino.execution.ParameterExtractor.bindParameters;
 import static io.trino.execution.QueryState.FAILED;
 import static io.trino.execution.QueryState.PLANNING;
 import static io.trino.server.DynamicFilterService.DynamicFiltersStats;
 import static io.trino.spi.StandardErrorCode.STACK_OVERFLOW;
-import static io.trino.sql.ParameterUtils.parameterExtractor;
 import static java.lang.Thread.currentThread;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.SECONDS;
@@ -260,7 +260,7 @@ public class SqlQueryExecution
         Analyzer analyzer = analyzerFactory.createAnalyzer(
                 stateMachine.getSession(),
                 preparedQuery.getParameters(),
-                parameterExtractor(preparedQuery.getStatement(), preparedQuery.getParameters()),
+                bindParameters(preparedQuery.getStatement(), preparedQuery.getParameters()),
                 warningCollector);
         Analysis analysis;
         try {

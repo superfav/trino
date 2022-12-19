@@ -170,8 +170,9 @@ public class OrcPageSource
 
         completedPositions += page.getPositionCount();
 
-        OptionalLong startRowId = originalFileRowId.isPresent() ?
-                OptionalLong.of(originalFileRowId.get() + recordReader.getFilePosition()) : OptionalLong.empty();
+        OptionalLong startRowId = originalFileRowId
+                .map(rowId -> OptionalLong.of(rowId + recordReader.getFilePosition()))
+                .orElseGet(OptionalLong::empty);
 
         if (deletedRows.isPresent()) {
             boolean deletedRowsYielded = !deletedRows.get().loadOrYield();
@@ -416,7 +417,7 @@ public class OrcPageSource
 
     /**
      * This ColumnAdaptation creates a RowBlock column containing the three
-     * ACID columms - - originalTransaction, rowId, bucket - - and
+     * ACID columns - - originalTransaction, rowId, bucket - - and
      * all the columns not changed by the UPDATE statement.
      */
     private static final class UpdatedRowAdaptation
@@ -440,7 +441,7 @@ public class OrcPageSource
 
     /**
      * This ColumnAdaptation creates a RowBlock column containing the three
-     * ACID columms derived from the startingRowId and bucketId, and a special
+     * ACID columns derived from the startingRowId and bucketId, and a special
      * original files transaction block, plus a block containing
      * all the columns not changed by the UPDATE statement.
      */
@@ -455,7 +456,7 @@ public class OrcPageSource
         public UpdatedRowAdaptationWithOriginalFiles(long startingRowId, int bucketId, HiveUpdateProcessor updateProcessor, List<HiveColumnHandle> dependencyColumns)
         {
             this.startingRowId = startingRowId;
-            this.bucketBlock = nativeValueToBlock(INTEGER, Long.valueOf(computeBucketValue(bucketId, 0)));
+            this.bucketBlock = nativeValueToBlock(INTEGER, (long) computeBucketValue(bucketId, 0));
             this.updateProcessor = requireNonNull(updateProcessor, "updateProcessor is null");
             requireNonNull(dependencyColumns, "dependencyColumns is null");
             this.nonUpdatedSourceChannels = updateProcessor.makeNonUpdatedSourceChannels(dependencyColumns);
@@ -513,7 +514,7 @@ public class OrcPageSource
         public MergedRowAdaptationWithOriginalFiles(long startingRowId, int bucketId)
         {
             this.startingRowId = startingRowId;
-            this.bucketBlock = nativeValueToBlock(INTEGER, Long.valueOf(computeBucketValue(bucketId, 0)));
+            this.bucketBlock = nativeValueToBlock(INTEGER, (long) computeBucketValue(bucketId, 0));
         }
 
         @Override
@@ -540,7 +541,7 @@ public class OrcPageSource
         public OriginalFileRowIdAdaptation(long startingRowId, int bucketId)
         {
             this.startingRowId = startingRowId;
-            this.bucketBlock = nativeValueToBlock(INTEGER, Long.valueOf(computeBucketValue(bucketId, 0)));
+            this.bucketBlock = nativeValueToBlock(INTEGER, (long) computeBucketValue(bucketId, 0));
         }
 
         @Override

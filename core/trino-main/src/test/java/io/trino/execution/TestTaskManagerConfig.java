@@ -28,11 +28,12 @@ import static io.airlift.configuration.testing.ConfigAssertions.recordDefaults;
 import static io.airlift.units.DataSize.Unit;
 import static io.trino.util.MachineInfo.getAvailablePhysicalProcessorCount;
 import static it.unimi.dsi.fastutil.HashCommon.nextPowerOfTwo;
+import static java.lang.Math.max;
 import static java.lang.Math.min;
 
 public class TestTaskManagerConfig
 {
-    private static final int DEFAULT_PROCESSOR_COUNT = min(nextPowerOfTwo(getAvailablePhysicalProcessorCount()), 32);
+    private static final int DEFAULT_PROCESSOR_COUNT = min(max(nextPowerOfTwo(getAvailablePhysicalProcessorCount()), 2), 32);
 
     @Test
     public void testDefaults()
@@ -103,7 +104,7 @@ public class TestTaskManagerConfig
                 .put("task.scale-writers.enabled", "false")
                 .put("task.scale-writers.max-writer-count", "4")
                 .put("task.writer-count", "4")
-                .put("task.partitioned-writer-count", "4")
+                .put("task.partitioned-writer-count", Integer.toString(processorCount))
                 .put("task.concurrency", Integer.toString(processorCount))
                 .put("task.http-response-threads", "4")
                 .put("task.http-timeout-threads", "10")
@@ -141,7 +142,7 @@ public class TestTaskManagerConfig
                 .setScaleWritersEnabled(false)
                 .setScaleWritersMaxWriterCount(4)
                 .setWriterCount(4)
-                .setPartitionedWriterCount(4)
+                .setPartitionedWriterCount(processorCount)
                 .setTaskConcurrency(processorCount)
                 .setHttpResponseThreads(4)
                 .setHttpTimeoutThreads(10)

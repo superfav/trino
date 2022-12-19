@@ -68,7 +68,7 @@ import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.sql.planner.OptimizerConfig.JoinDistributionType.PARTITIONED;
 import static io.trino.sql.planner.OptimizerConfig.JoinReorderingStrategy.NONE;
 import static io.trino.testing.QueryAssertions.assertEqualsIgnoreOrder;
-import static io.trino.testing.sql.TestTable.randomTableSuffix;
+import static io.trino.testing.TestingNames.randomNameSuffix;
 import static io.trino.tpch.TpchTable.CUSTOMER;
 import static io.trino.tpch.TpchTable.NATION;
 import static io.trino.tpch.TpchTable.ORDERS;
@@ -125,10 +125,9 @@ public abstract class BaseFailureRecoveryTest
                         .put("exchange.deduplication-buffer-size", "1kB")
                         .put("fault-tolerant-execution-task-memory", "1GB")
                         .buildOrThrow(),
-                ImmutableMap.<String, String>builder()
+                ImmutableMap.of(
                         // making http timeouts shorter so tests which simulate communication timeouts finish in reasonable amount of time
-                        .put("scheduler.http-client.idle-timeout", REQUEST_TIMEOUT.toString())
-                        .buildOrThrow());
+                        "scheduler.http-client.idle-timeout", REQUEST_TIMEOUT.toString()));
     }
 
     protected abstract QueryRunner createQueryRunner(
@@ -251,7 +250,13 @@ public abstract class BaseFailureRecoveryTest
     @Test(invocationCount = INVOCATION_COUNT)
     public void testUserFailure()
     {
-        assertThatThrownBy(() -> getQueryRunner().execute("SELECT * FROM nation WHERE regionKey / nationKey - 1 = 0"))
+        // Some connectors have pushdowns enabled for arithmetic operations (like SqlServer),
+        // so exception will come not from trino, but from datasource itself
+        Session withoutPushdown = Session.builder(this.getSession())
+                .setSystemProperty("allow_pushdown_into_connectors", "false")
+                .build();
+
+        assertThatThrownBy(() -> getQueryRunner().execute(withoutPushdown, "SELECT * FROM nation WHERE regionKey / nationKey - 1 = 0"))
                 .hasMessageMatching("(?i).*Division by zero.*"); // some errors come back with different casing.
 
         assertThatQuery("SELECT * FROM nation")
@@ -590,7 +595,7 @@ public abstract class BaseFailureRecoveryTest
 
         private ExecutionResult execute(Session session, String query, Optional<String> traceToken)
         {
-            String tableName = "table_" + randomTableSuffix();
+            String tableName = "table_" + randomNameSuffix();
             setup.ifPresent(sql -> getQueryRunner().execute(noRetries(session), resolveTableName(sql, tableName)));
 
             MaterializedResultWithQueryId resultWithQueryId = null;

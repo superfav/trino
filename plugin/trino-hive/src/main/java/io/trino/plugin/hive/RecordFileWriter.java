@@ -13,7 +13,6 @@
  */
 package io.trino.plugin.hive;
 
-import com.google.common.collect.ImmutableList;
 import io.airlift.units.DataSize;
 import io.trino.plugin.hive.metastore.StorageFormat;
 import io.trino.plugin.hive.parquet.ParquetRecordWriter;
@@ -38,6 +37,7 @@ import org.apache.hadoop.mapred.JobConf;
 import org.joda.time.DateTimeZone;
 import org.openjdk.jol.info.ClassLayout;
 
+import java.io.Closeable;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.List;
@@ -115,9 +115,9 @@ public class RecordFileWriter
         }
 
         // reorder (and possibly reduce) struct fields to match input
-        structFields = ImmutableList.copyOf(inputColumnNames.stream()
+        structFields = inputColumnNames.stream()
                 .map(tableInspector::getStructFieldRef)
-                .collect(toImmutableList()));
+                .collect(toImmutableList());
 
         row = tableInspector.create();
 
@@ -192,7 +192,7 @@ public class RecordFileWriter
     }
 
     @Override
-    public void commit()
+    public Closeable commit()
     {
         try {
             recordWriter.close(false);
@@ -201,23 +201,25 @@ public class RecordFileWriter
         catch (IOException e) {
             throw new TrinoException(HIVE_WRITER_CLOSE_ERROR, "Error committing write to Hive", e);
         }
+
+        return createRollbackAction(path, conf);
     }
 
     @Override
     public void rollback()
     {
-        try {
-            try {
-                recordWriter.close(true);
-            }
-            finally {
-                // perform explicit deletion here as implementations of RecordWriter.close() often ignore the abort flag.
-                path.getFileSystem(conf).delete(path, false);
-            }
+        Closeable rollbackAction = createRollbackAction(path, conf);
+        try (rollbackAction) {
+            recordWriter.close(true);
         }
         catch (IOException e) {
             throw new TrinoException(HIVE_WRITER_CLOSE_ERROR, "Error rolling back write to Hive", e);
         }
+    }
+
+    private static Closeable createRollbackAction(Path path, JobConf conf)
+    {
+        return () -> path.getFileSystem(conf).delete(path, false);
     }
 
     @Override

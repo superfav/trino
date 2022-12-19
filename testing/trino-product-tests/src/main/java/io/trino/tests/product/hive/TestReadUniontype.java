@@ -24,6 +24,7 @@ import org.testng.annotations.Test;
 import java.util.Arrays;
 import java.util.List;
 
+import static io.trino.testing.TestingNames.randomNameSuffix;
 import static io.trino.tests.product.TestGroups.SMOKE;
 import static io.trino.tests.product.utils.QueryExecutors.onHive;
 import static io.trino.tests.product.utils.QueryExecutors.onTrino;
@@ -49,6 +50,87 @@ public class TestReadUniontype
     public static Object[][] storageFormats()
     {
         return new String[][] {{"ORC"}, {"AVRO"}};
+    }
+
+    @DataProvider(name = "union_dereference_test_cases")
+    public static Object[][] unionDereferenceTestCases()
+    {
+        String tableUnionDereference = "test_union_dereference" + randomNameSuffix();
+        // Hive insertion for union type in AVRO format has bugs, so we test on different table schemas for AVRO than ORC.
+        return new Object[][] {{
+                format(
+                        "CREATE TABLE %s (unionLevel0 UNIONTYPE<" +
+                                "INT, STRING>)" +
+                                "STORED AS %s",
+                        tableUnionDereference,
+                        "AVRO"),
+                format(
+                        "INSERT INTO TABLE %s " +
+                                "SELECT create_union(0, 321, 'row1') " +
+                                "UNION ALL " +
+                                "SELECT create_union(1, 55, 'row2') ",
+                        tableUnionDereference),
+                format("SELECT unionLevel0.field0 FROM %s WHERE unionLevel0.field0 IS NOT NULL", tableUnionDereference),
+                Arrays.asList(321),
+                format("SELECT unionLevel0.tag FROM %s", tableUnionDereference),
+                Arrays.asList((byte) 0, (byte) 1),
+                "DROP TABLE IF EXISTS " + tableUnionDereference},
+                // there is an internal issue in Hive 1.2:
+                // unionLevel1 is declared as unionType<String, Int>, but has to be inserted by create_union(tagId, Int, String)
+                {
+                        format(
+                                "CREATE TABLE %s (unionLevel0 UNIONTYPE<INT, STRING," +
+                                        "STRUCT<intLevel1:INT, stringLevel1:STRING, unionLevel1:UNIONTYPE<STRING, INT>>>, intLevel0 INT )" +
+                                        "STORED AS %s",
+                                tableUnionDereference,
+                                "AVRO"),
+                        format(
+                                "INSERT INTO TABLE %s " +
+                                        "SELECT create_union(2, 321, 'row1', named_struct('intLevel1', 1, 'stringLevel1', 'structval', 'unionLevel1', create_union(0, 5, 'testString'))), 8 " +
+                                        "UNION ALL " +
+                                        "SELECT create_union(2, 321, 'row1', named_struct('intLevel1', 1, 'stringLevel1', 'structval', 'unionLevel1', create_union(1, 5, 'testString'))), 8 ",
+                                tableUnionDereference),
+                        format("SELECT unionLevel0.field2.unionLevel1.field1 FROM %s WHERE  unionLevel0.field2.unionLevel1.field1 IS NOT NULL", tableUnionDereference),
+                        Arrays.asList(5),
+                        format("SELECT unionLevel0.field2.unionLevel1.tag FROM %s", tableUnionDereference),
+                        Arrays.asList((byte) 0, (byte) 1),
+                        "DROP TABLE IF EXISTS " + tableUnionDereference},
+                {
+                        format(
+                                "CREATE TABLE %s (unionLevel0 UNIONTYPE<" +
+                                        "STRUCT<unionLevel1:UNIONTYPE<STRING, INT>>>)" +
+                                        "STORED AS %s",
+                                tableUnionDereference,
+                                "ORC"),
+                        format(
+                                "INSERT INTO TABLE %s " +
+                                        "SELECT create_union(0, named_struct('unionLevel1', create_union(0, 'testString1', 23))) " +
+                                        "UNION ALL " +
+                                        "SELECT create_union(0, named_struct('unionLevel1', create_union(1, 'testString2', 45))) ",
+                                tableUnionDereference),
+                        format("SELECT unionLevel0.field0.unionLevel1.field0 FROM %s WHERE unionLevel0.field0.unionLevel1.field0 IS NOT NULL", tableUnionDereference),
+                        Arrays.asList("testString1"),
+                        format("SELECT unionLevel0.field0.unionLevel1.tag FROM %s", tableUnionDereference),
+                        Arrays.asList((byte) 0, (byte) 1),
+                        "DROP TABLE IF EXISTS " + tableUnionDereference},
+                {
+                        format(
+                                "CREATE TABLE %s (unionLevel0 UNIONTYPE<INT, STRING," +
+                                        "STRUCT<intLevel1:INT, stringLevel1:STRING, unionLevel1:UNIONTYPE<STRING, INT>>>, intLevel0 INT )" +
+                                        "STORED AS %s",
+                                tableUnionDereference,
+                                "ORC"),
+                        format(
+                                "INSERT INTO TABLE %s " +
+                                        "SELECT create_union(2, 321, 'row1', named_struct('intLevel1', 1, 'stringLevel1', 'structval', 'unionLevel1', create_union(0, 'testString', 5))), 8 " +
+                                        "UNION ALL " +
+                                        "SELECT create_union(2, 321, 'row1', named_struct('intLevel1', 1, 'stringLevel1', 'structval', 'unionLevel1', create_union(1, 'testString', 5))), 8 ",
+                                tableUnionDereference),
+                        format("SELECT unionLevel0.field2.unionLevel1.field0 FROM %s WHERE  unionLevel0.field2.unionLevel1.field0 IS NOT NULL", tableUnionDereference),
+                        Arrays.asList("testString"),
+                        format("SELECT unionLevel0.field2.unionLevel1.tag FROM %s", tableUnionDereference),
+                        Arrays.asList((byte) 0, (byte) 1),
+                        "DROP TABLE IF EXISTS " + tableUnionDereference}};
     }
 
     @Test(dataProvider = "storage_formats", groups = SMOKE)
@@ -137,6 +219,25 @@ public class TestReadUniontype
         }
     }
 
+    @Test(dataProvider = "union_dereference_test_cases", groups = SMOKE)
+    public void testReadUniontypeWithDereference(String createTableSql, String insertSql, String selectSql, List<Object> expectedResult, String selectTagSql, List<Object> expectedTagResult, String dropTableSql)
+    {
+        // According to testing results, the Hive INSERT queries here only work in Hive 1.2
+        if (getHiveVersionMajor() != 1 || getHiveVersionMinor() != 2) {
+            throw new SkipException("This test can only be run with Hive 1.2 (default config)");
+        }
+
+        onHive().executeQuery(createTableSql);
+        onHive().executeQuery(insertSql);
+
+        QueryResult result = onTrino().executeQuery(selectSql);
+        assertThat(result.column(1)).containsExactlyInAnyOrderElementsOf(expectedResult);
+        result = onTrino().executeQuery(selectTagSql);
+        assertThat(result.column(1)).containsExactlyInAnyOrderElementsOf(expectedTagResult);
+
+        onTrino().executeQuery(dropTableSql);
+    }
+
     @Test(dataProvider = "storage_formats", groups = SMOKE)
     public void testUnionTypeSchemaEvolution(String storageFormat)
     {
@@ -165,6 +266,39 @@ public class TestReadUniontype
             default:
                 throw new UnsupportedOperationException("Unsupported table format.");
         }
+    }
+
+    @Test(groups = SMOKE)
+    public void testReadOrcUniontypeWithCheckpoint()
+    {
+        // According to testing results, the Hive INSERT queries here only work in Hive 1.2
+        if (getHiveVersionMajor() != 1 || getHiveVersionMinor() != 2) {
+            throw new SkipException("This test can only be run with Hive 1.2 (default config)");
+        }
+
+        // Set the row group size to 1000 (the minimum value).
+        onHive().executeQuery(format(
+                "CREATE TABLE %s (id INT,foo UNIONTYPE<" +
+                        "INT," +
+                        "DOUBLE," +
+                        "ARRAY<STRING>>)" +
+                        "STORED AS ORC TBLPROPERTIES (\"orc.row.index.stride\"=\"1000\")",
+                TABLE_NAME));
+
+        // Generate a file with 1100 rows, as the default row group size is 1000, reading 1100 rows will involve
+        // streaming checkpoint.
+        StringBuilder builder = new StringBuilder();
+        for (int i = 0; i < 1100; i++) {
+            builder.append("SELECT 0, create_union(0, CAST(36 AS INT), CAST(NULL AS DOUBLE), ARRAY('foo','bar')) ");
+            if (i < 1099) {
+                builder.append("UNION ALL ");
+            }
+        }
+        onHive().executeQuery(format(
+                "INSERT INTO TABLE %s " + builder.toString(), TABLE_NAME));
+
+        QueryResult selectAllResult = onTrino().executeQuery(format("SELECT * FROM %s", TABLE_NAME));
+        assertEquals(selectAllResult.rows().size(), 1100);
     }
 
     private void testORCSchemaEvolution()

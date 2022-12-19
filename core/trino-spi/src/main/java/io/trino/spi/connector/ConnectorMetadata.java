@@ -59,6 +59,8 @@ import static java.util.stream.Collectors.toUnmodifiableList;
 
 public interface ConnectorMetadata
 {
+    String MODIFYING_ROWS_MESSAGE = "This connector does not support modifying table rows";
+
     /**
      * Checks if a schema exists. The connector may have schemas that exist
      * but are not enumerable via {@link #listSchemaNames}.
@@ -179,7 +181,7 @@ public interface ConnectorMetadata
 
     /**
      * Returns the system table for the specified table name, if one exists.
-     * The system tables handled via {@link #getSystemTable} differ form those returned by {@link Connector#getSystemTables()}.
+     * The system tables handled via this method differ form those returned by {@link Connector#getSystemTables()}.
      * The former mechanism allows dynamic resolution of system tables, while the latter is
      * based on static list of system tables built during startup.
      */
@@ -702,7 +704,7 @@ public interface ConnectorMetadata
      */
     default RowChangeParadigm getRowChangeParadigm(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
-        throw new TrinoException(NOT_SUPPORTED, "This connector does not support merges");
+        throw new TrinoException(NOT_SUPPORTED, MODIFYING_ROWS_MESSAGE);
     }
 
     /**
@@ -712,7 +714,7 @@ public interface ConnectorMetadata
      */
     default ColumnHandle getMergeRowIdColumnHandle(ConnectorSession session, ConnectorTableHandle tableHandle)
     {
-        throw new TrinoException(NOT_SUPPORTED, "This connector does not support merges");
+        throw new TrinoException(NOT_SUPPORTED, MODIFYING_ROWS_MESSAGE);
     }
 
     /**
@@ -731,7 +733,7 @@ public interface ConnectorMetadata
      */
     default ConnectorMergeTableHandle beginMerge(ConnectorSession session, ConnectorTableHandle tableHandle, RetryMode retryMode)
     {
-        throw new TrinoException(NOT_SUPPORTED, "This connector does not support merges");
+        throw new TrinoException(NOT_SUPPORTED, MODIFYING_ROWS_MESSAGE);
     }
 
     /**
@@ -1114,7 +1116,7 @@ public interface ConnectorMetadata
      *       c = CH2
      * </pre>
      * <p>
-     * The optimizer would call {@link #applyProjection} with the following arguments:
+     * The optimizer would call this method with the following arguments:
      *
      * <pre>
      * handle = TH0

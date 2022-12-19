@@ -26,15 +26,15 @@ import java.util.Map;
 
 import static io.trino.plugin.hive.containers.HiveMinioDataLake.MINIO_ACCESS_KEY;
 import static io.trino.plugin.hive.containers.HiveMinioDataLake.MINIO_SECRET_KEY;
-import static io.trino.testing.sql.TestTable.randomTableSuffix;
+import static io.trino.testing.TestingNames.randomNameSuffix;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 public class TestDeltaLakeSharedHiveMetastoreWithViews
         extends AbstractTestQueryFramework
 {
-    protected final String schema = "test_shared_schema_with_hive_views_" + randomTableSuffix();
-    private final String bucketName = "delta-lake-shared-hive-with-views-" + randomTableSuffix();
+    protected final String schema = "test_shared_schema_with_hive_views_" + randomNameSuffix();
+    private final String bucketName = "delta-lake-shared-hive-with-views-" + randomNameSuffix();
 
     private HiveMinioDataLake hiveMinioDataLake;
 
@@ -48,9 +48,7 @@ public class TestDeltaLakeSharedHiveMetastoreWithViews
         DistributedQueryRunner queryRunner = DeltaLakeQueryRunner.createS3DeltaLakeQueryRunner(
                 "delta",
                 schema,
-                ImmutableMap.<String, String>builder()
-                        .put("delta.enable-non-concurrent-writes", "true")
-                        .buildOrThrow(),
+                ImmutableMap.of("delta.enable-non-concurrent-writes", "true"),
                 hiveMinioDataLake.getMinioAddress(),
                 hiveMinioDataLake.getHiveHadoop());
         queryRunner.execute("CREATE SCHEMA " + schema + " WITH (location = 's3://" + bucketName + "/" + schema + "')");

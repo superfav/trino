@@ -13,7 +13,6 @@
  */
 package io.trino.plugin.iceberg.catalog;
 
-import io.airlift.log.Logger;
 import io.trino.plugin.hive.metastore.Column;
 import io.trino.plugin.hive.metastore.StorageFormat;
 import io.trino.spi.connector.ConnectorSession;
@@ -37,14 +36,16 @@ import javax.annotation.concurrent.NotThreadSafe;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.plugin.hive.HiveType.toHiveType;
+import static io.trino.plugin.iceberg.IcebergUtil.METADATA_FOLDER_NAME;
 import static io.trino.plugin.iceberg.IcebergUtil.fixBrokenMetadataLocation;
 import static io.trino.plugin.iceberg.IcebergUtil.getLocationProvider;
-import static java.lang.Integer.parseInt;
+import static io.trino.plugin.iceberg.IcebergUtil.parseVersion;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 import static java.util.UUID.randomUUID;
@@ -58,10 +59,6 @@ import static org.apache.iceberg.util.LocationUtil.stripTrailingSlash;
 public abstract class AbstractIcebergTableOperations
         implements IcebergTableOperations
 {
-    private static final Logger log = Logger.get(AbstractIcebergTableOperations.class);
-
-    protected static final String METADATA_FOLDER_NAME = "metadata";
-
     public static final StorageFormat ICEBERG_METASTORE_STORAGE_FORMAT = StorageFormat.create(
             LazySimpleSerDe.class.getName(),
             FileInputFormat.class.getName(),
@@ -77,7 +74,7 @@ public abstract class AbstractIcebergTableOperations
     protected TableMetadata currentMetadata;
     protected String currentMetadataLocation;
     protected boolean shouldRefresh = true;
-    protected int version = -1;
+    protected OptionalInt version = OptionalInt.empty();
 
     protected AbstractIcebergTableOperations(
             FileIO fileIo,
@@ -249,19 +246,6 @@ public abstract class AbstractIcebergTableOperations
             return format("%s/%s", stripTrailingSlash(location), filename);
         }
         return format("%s/%s/%s", stripTrailingSlash(metadata.location()), METADATA_FOLDER_NAME, filename);
-    }
-
-    protected static int parseVersion(String metadataLocation)
-    {
-        int versionStart = metadataLocation.lastIndexOf('/') + 1; // if '/' isn't found, this will be 0
-        int versionEnd = metadataLocation.indexOf('-', versionStart);
-        try {
-            return parseInt(metadataLocation.substring(versionStart, versionEnd));
-        }
-        catch (NumberFormatException | IndexOutOfBoundsException e) {
-            log.warn(e, "Unable to parse version from metadata location: %s", metadataLocation);
-            return -1;
-        }
     }
 
     protected static List<Column> toHiveColumns(List<NestedField> columns)

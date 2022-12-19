@@ -18,6 +18,7 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Ordering;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
+import io.airlift.log.Logger;
 import io.trino.execution.scheduler.StageExecution;
 import io.trino.execution.scheduler.StageExecution.State;
 import io.trino.server.DynamicFilterService;
@@ -56,6 +57,7 @@ import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
+import static com.google.common.collect.MoreCollectors.onlyElement;
 import static io.trino.execution.scheduler.StageExecution.State.FLUSHING;
 import static io.trino.execution.scheduler.StageExecution.State.RUNNING;
 import static io.trino.execution.scheduler.StageExecution.State.SCHEDULED;
@@ -75,6 +77,8 @@ import static java.util.function.Function.identity;
 public class PhasedExecutionSchedule
         implements ExecutionSchedule
 {
+    private static final Logger log = Logger.get(PhasedExecutionSchedule.class);
+
     /**
      * Graph representing a before -> after relationship between fragments.
      * Destination fragment should be started only when source stage is completed.
@@ -90,7 +94,7 @@ public class PhasedExecutionSchedule
      */
     private final List<PlanFragmentId> sortedFragments = new ArrayList<>();
     private final Map<PlanFragmentId, StageExecution> stagesByFragmentId;
-    private final Set<StageExecution> activeStages = new LinkedHashSet<>();
+    private final Set<StageExecution> schedulingStages = new LinkedHashSet<>();
     private final DynamicFilterService dynamicFilterService;
 
     /**
@@ -127,6 +131,12 @@ public class PhasedExecutionSchedule
                 .forEach(fragmentsToExecute::add);
         fragmentOrdering = Ordering.explicit(sortedFragments);
         selectForExecution(fragmentsToExecute.build());
+        log.debug(
+                "fragmentDependency: %s, fragmentTopology: %s, sortedFragments: %s, stagesByFragmentId: %s",
+                fragmentDependency,
+                fragmentTopology,
+                sortedFragments,
+                stagesByFragmentId);
     }
 
     @Override
@@ -136,7 +146,7 @@ public class PhasedExecutionSchedule
         // notifications from previously started stages are not lost
         Optional<ListenableFuture<Void>> rescheduleFuture = getRescheduleFuture();
         schedule();
-        return new StagesScheduleResult(activeStages, rescheduleFuture);
+        return new StagesScheduleResult(schedulingStages, rescheduleFuture);
     }
 
     @Override
@@ -156,7 +166,7 @@ public class PhasedExecutionSchedule
     void schedule()
     {
         ImmutableSet.Builder<PlanFragmentId> fragmentsToExecute = ImmutableSet.builder();
-        fragmentsToExecute.addAll(removeCompletedStages());
+        fragmentsToExecute.addAll(removeScheduledStages());
         fragmentsToExecute.addAll(unblockStagesWithFullOutputBuffer());
         selectForExecution(fragmentsToExecute.build());
     }
@@ -174,24 +184,25 @@ public class PhasedExecutionSchedule
     }
 
     @VisibleForTesting
-    Set<StageExecution> getActiveStages()
+    Set<StageExecution> getSchedulingStages()
     {
-        return activeStages;
+        return schedulingStages;
     }
 
-    private Set<PlanFragmentId> removeCompletedStages()
+    private Set<PlanFragmentId> removeScheduledStages()
     {
-        // iterate over all stages, not only active ones; stages which are not yet active could have already been aborted
-        Set<StageExecution> completedStages = stagesByFragmentId.values().stream()
-                .filter(this::isStageCompleted)
+        // iterate over all stages, not only scheduling ones; stages which are not yet scheduling could have already been aborted
+        Set<StageExecution> scheduledStages = stagesByFragmentId.values().stream()
+                .filter(this::isStageScheduled)
                 .collect(toImmutableSet());
         // remove completed stages outside of Java stream to prevent concurrent modification
-        return completedStages.stream()
-                .flatMap(stage -> removeCompletedStage(stage).stream())
+        log.debug("scheduledStages: %s", scheduledStages);
+        return scheduledStages.stream()
+                .flatMap(stage -> removeScheduledStage(stage).stream())
                 .collect(toImmutableSet());
     }
 
-    private Set<PlanFragmentId> removeCompletedStage(StageExecution stage)
+    private Set<PlanFragmentId> removeScheduledStage(StageExecution stage)
     {
         // start all stages that depend on completed stage
         PlanFragmentId fragmentId = stage.getFragment().getId();
@@ -205,18 +216,19 @@ public class PhasedExecutionSchedule
                 .filter(dependentFragmentId -> fragmentDependency.inDegreeOf(dependentFragmentId) == 1)
                 .collect(toImmutableSet());
         fragmentDependency.removeVertex(fragmentId);
-        fragmentTopology.removeVertex(fragmentId);
-        activeStages.remove(stage);
+        schedulingStages.remove(stage);
         return fragmentsToExecute;
     }
 
     private Set<PlanFragmentId> unblockStagesWithFullOutputBuffer()
     {
-        // find stages that are blocked on full task output buffer
-        Set<PlanFragmentId> blockedFragments = activeStages.stream()
+        // iterate over all stages, not only scheduled ones; stages which are scheduled but still running
+        // (e.g. partitioned stage with broadcast output buffer) might have blocked task output buffer
+        Set<PlanFragmentId> blockedFragments = stagesByFragmentId.values().stream()
                 .filter(StageExecution::isAnyTaskBlocked)
                 .map(stage -> stage.getFragment().getId())
                 .collect(toImmutableSet());
+        log.debug("blockedFragments: %s", blockedFragments);
         // start immediate downstream stages so that data can be consumed
         return blockedFragments.stream()
                 .flatMap(fragmentId -> fragmentTopology.outgoingEdgesOf(fragmentId).stream())
@@ -227,32 +239,33 @@ public class PhasedExecutionSchedule
     private void selectForExecution(Set<PlanFragmentId> fragmentIds)
     {
         requireNonNull(fragmentOrdering, "fragmentOrdering is null");
-        fragmentIds.stream()
+        List<StageExecution> selectedForExecution = fragmentIds.stream()
                 .sorted(fragmentOrdering)
                 .map(stagesByFragmentId::get)
-                .forEach(this::selectForExecution);
+                .collect(toImmutableList());
+        log.debug("selectedForExecution: %s", selectedForExecution);
+        selectedForExecution.forEach(this::selectForExecution);
     }
 
     private void selectForExecution(StageExecution stage)
     {
-        if (isStageCompleted(stage)) {
+        if (isStageScheduled(stage)) {
             // don't start completed stages (can happen when non-lazy stage is selected for
             // execution and stage is started immediately even with dependencies)
             return;
         }
 
-        if (fragmentDependency.outDegreeOf(stage.getFragment().getId()) > 0) {
+        if (schedulingStages.add(stage) && fragmentDependency.outDegreeOf(stage.getFragment().getId()) > 0) {
             // if there are any dependent stages then reschedule when stage is completed
             stage.addStateChangeListener(state -> {
-                if (isStageCompleted(stage)) {
-                    notifyReschedule();
+                if (isStageScheduled(stage)) {
+                    notifyReschedule(stage);
                 }
             });
         }
-        activeStages.add(stage);
     }
 
-    private void notifyReschedule()
+    private void notifyReschedule(StageExecution stage)
     {
         SettableFuture<Void> rescheduleFuture;
         synchronized (this) {
@@ -260,10 +273,11 @@ public class PhasedExecutionSchedule
             this.rescheduleFuture = SettableFuture.create();
         }
         // notify listeners outside of the critical section
+        log.debug("notifyReschedule by %s", stage);
         rescheduleFuture.set(null);
     }
 
-    private boolean isStageCompleted(StageExecution stage)
+    private boolean isStageScheduled(StageExecution stage)
     {
         State state = stage.getState();
         return state == SCHEDULED || state == RUNNING || state == FLUSHING || state.isDone();
@@ -277,7 +291,8 @@ public class PhasedExecutionSchedule
 
         QueryId queryId = stages.stream()
                 .map(stage -> stage.getStageId().getQueryId())
-                .findAny().orElseThrow();
+                .distinct()
+                .collect(onlyElement());
         List<PlanFragment> fragments = stages.stream()
                 .map(StageExecution::getFragment)
                 .collect(toImmutableList());

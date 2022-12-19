@@ -39,11 +39,11 @@ import java.util.TimeZone;
 
 import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
 import static io.trino.SystemSessionProperties.TIME_ZONE_ID;
+import static io.trino.execution.ParameterExtractor.bindParameters;
 import static io.trino.spi.StandardErrorCode.INVALID_LITERAL;
 import static io.trino.spi.StandardErrorCode.TYPE_MISMATCH;
 import static io.trino.spi.type.TimeZoneKey.getTimeZoneKey;
 import static io.trino.spi.type.TimeZoneKey.getTimeZoneKeyForOffset;
-import static io.trino.sql.ParameterUtils.parameterExtractor;
 import static io.trino.sql.analyzer.ExpressionAnalyzer.createConstantAnalyzer;
 import static io.trino.sql.planner.ExpressionInterpreter.evaluateConstantExpression;
 import static io.trino.util.Failures.checkCondition;
@@ -91,7 +91,7 @@ public class SetTimeZoneTask
             List<Expression> parameters,
             WarningCollector warningCollector)
     {
-        Map<NodeRef<Parameter>, Expression> parameterLookup = parameterExtractor(statement, parameters);
+        Map<NodeRef<Parameter>, Expression> parameterLookup = bindParameters(statement, parameters);
         ExpressionAnalyzer analyzer = createConstantAnalyzer(
                 plannerContext,
                 accessControl,

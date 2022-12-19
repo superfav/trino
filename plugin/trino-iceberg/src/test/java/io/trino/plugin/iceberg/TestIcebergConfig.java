@@ -49,7 +49,7 @@ public class TestIcebergConfig
                 .setCatalogType(HIVE_METASTORE)
                 .setDynamicFilteringWaitTimeout(new Duration(0, MINUTES))
                 .setTableStatisticsEnabled(true)
-                .setExtendedStatisticsEnabled(false)
+                .setExtendedStatisticsEnabled(true)
                 .setProjectionPushdownEnabled(true)
                 .setHiveCatalogName(null)
                 .setFormatVersion(2)
@@ -58,7 +58,8 @@ public class TestIcebergConfig
                 .setDeleteSchemaLocationsFallback(false)
                 .setTargetMaxFileSize(DataSize.of(1, GIGABYTE))
                 .setMinimumAssignedSplitWeight(0.05)
-                .setMaterializedViewsStorageSchema(null));
+                .setMaterializedViewsStorageSchema(null)
+                .setRegisterTableProcedureEnabled(false));
     }
 
     @Test
@@ -73,7 +74,7 @@ public class TestIcebergConfig
                 .put("iceberg.catalog.type", "GLUE")
                 .put("iceberg.dynamic-filtering.wait-timeout", "1h")
                 .put("iceberg.table-statistics-enabled", "false")
-                .put("iceberg.experimental.extended-statistics.enabled", "true")
+                .put("iceberg.extended-statistics.enabled", "false")
                 .put("iceberg.projection-pushdown-enabled", "false")
                 .put("iceberg.hive-catalog-name", "hive")
                 .put("iceberg.format-version", "1")
@@ -83,6 +84,7 @@ public class TestIcebergConfig
                 .put("iceberg.target-max-file-size", "1MB")
                 .put("iceberg.minimum-assigned-split-weight", "0.01")
                 .put("iceberg.materialized-views.storage-schema", "mv_storage_schema")
+                .put("iceberg.register-table-procedure.enabled", "true")
                 .buildOrThrow();
 
         IcebergConfig expected = new IcebergConfig()
@@ -94,7 +96,7 @@ public class TestIcebergConfig
                 .setCatalogType(GLUE)
                 .setDynamicFilteringWaitTimeout(Duration.valueOf("1h"))
                 .setTableStatisticsEnabled(false)
-                .setExtendedStatisticsEnabled(true)
+                .setExtendedStatisticsEnabled(false)
                 .setProjectionPushdownEnabled(false)
                 .setHiveCatalogName("hive")
                 .setFormatVersion(1)
@@ -103,7 +105,8 @@ public class TestIcebergConfig
                 .setDeleteSchemaLocationsFallback(true)
                 .setTargetMaxFileSize(DataSize.of(1, MEGABYTE))
                 .setMinimumAssignedSplitWeight(0.01)
-                .setMaterializedViewsStorageSchema("mv_storage_schema");
+                .setMaterializedViewsStorageSchema("mv_storage_schema")
+                .setRegisterTableProcedureEnabled(true);
 
         assertFullMapping(properties, expected);
     }
